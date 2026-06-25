@@ -1,22 +1,25 @@
 // Install / uninstall skills across one or more AI-coding platforms.
 //
 // Default behavior (no --target): auto-detect every installed
-// platform (Claude Code, Cursor, Codex, Copilot, ...) and write the
-// skill to each one. This matches the user's mental model from
-// other skills hubs ("install the skill, it shows up everywhere").
+// platform and write the skill to each one. Most platforms get the
+// simple "<skillsRoot>/<slug>/" copy; Cowork and Claude Desktop go
+// through their plugin-bundle installer (writes .claude-plugin/
+// plugin.json + manifest.json + skills/<slug>/) instead.
 //
 // Override with `--target claude-code,cursor` (specific platforms)
-// or `--dir <path>` (raw directory — useful for clients we don't
-// have in the registry yet).
+// or `--dir <path>` (raw directory). `--dir` always uses the simple
+// copy; the plugin-bundle installer is reachable only via the
+// `cowork` / `claude-desktop` platform ids.
 //
-// Each install is atomic-ish: copy to a staging dir next to the
-// destination, then rename. We refuse to overwrite an existing
-// install without --force — silent reinstalls hide problems.
+// Each standard install is atomic-ish: copy to a staging dir next
+// to the destination, then rename. Custom installers handle their
+// own atomicity (see src/cowork-plugin.ts).
 
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { findBundledSkill } from "./skills.js";
+import { findBundledSkill, listBundledSkills } from "./skills.js";
 import {
   detectAllPlatforms,
   realEnv,
@@ -27,21 +30,21 @@ import {
 export type InstallOpts = {
   slug: string;
   // EXACTLY ONE of these three controls the destination(s):
-  //   - targets:  explicit platform IDs (e.g. ["claude-code", "cursor"])
-  //   - dir:      raw directory (e.g. "./.claude/skills")
-  //   - (none):   auto-detect every installed platform
+  //   - targets: explicit platform IDs
+  //   - dir:     raw directory (always uses standard copy)
+  //   - (none):  auto-detect every installed platform
   targets?: PlatformRegistryEntry[];
   dir?: string;
   force?: boolean;
   dryRun?: boolean;
-  // Test-only overrides; never set in production code paths.
+  // Test-only overrides.
   env?: PlatformEnv;
   bundledRoot?: string;
+  packageVersion?: string;
 };
 
 export type InstallEntry = {
-  // Platform id, or "custom" when --dir was used.
-  platform: string;
+  platform: string;       // platform id, or "custom" when --dir was used
   label: string;
   installedTo: string;
   status: "installed" | "skipped-exists" | "would-install" | "error";
@@ -53,28 +56,39 @@ export type InstallResult = {
   entries: InstallEntry[];
 };
 
-/**
- * Resolve the list of destinations for an install call. Single
- * function so the CLI can show "what would I install where" in
- * --dry-run mode without duplicating the resolution logic.
- */
+type Destination = {
+  platform: string;
+  label: string;
+  /** Where this skill will land — `<skillsRoot>/<slug>` (or the bundle's equivalent). */
+  skillPath: string;
+  /** When set, run the platform's custom installer instead of standard copy. */
+  entry?: PlatformRegistryEntry;
+};
+
+/** Resolve where install() will write, given the user's flags. */
 export function resolveDestinations(opts: {
+  slug: string;
   targets?: PlatformRegistryEntry[];
   dir?: string;
   env?: PlatformEnv;
-}): Array<{ platform: string; label: string; root: string }> {
+}): Destination[] {
   const env = opts.env ?? realEnv();
 
   if (opts.dir) {
     return [
-      { platform: "custom", label: "Custom directory", root: path.resolve(opts.dir) },
+      {
+        platform: "custom",
+        label: "Custom directory",
+        skillPath: path.join(path.resolve(opts.dir), opts.slug),
+      },
     ];
   }
   const platforms = opts.targets ?? detectAllPlatforms(env);
   return platforms.map((p) => ({
     platform: p.id,
     label: p.label,
-    root: p.path(env),
+    skillPath: path.join(p.skillsRoot(env), opts.slug),
+    entry: p,
   }));
 }
 
@@ -87,10 +101,12 @@ export function install(opts: InstallOpts): InstallResult {
     );
   }
 
+  const env = opts.env ?? realEnv();
   const destinations = resolveDestinations({
+    slug: opts.slug,
     targets: opts.targets,
     dir: opts.dir,
-    env: opts.env,
+    env,
   });
 
   if (destinations.length === 0) {
@@ -103,19 +119,49 @@ export function install(opts: InstallOpts): InstallResult {
     );
   }
 
+  const skillMeta = listBundledSkills(opts.bundledRoot).find(
+    (s) => s.slug === opts.slug,
+  );
+  const skillName = skillMeta?.name ?? opts.slug;
+  const skillDescription = skillMeta?.description ?? "";
+  const pluginVersion = opts.packageVersion ?? detectPackageVersion();
+
   const entries: InstallEntry[] = [];
   for (const dest of destinations) {
-    const installedTo = path.join(dest.root, opts.slug);
+    if (opts.dryRun) {
+      entries.push({
+        platform: dest.platform,
+        label: dest.label,
+        installedTo: dest.skillPath,
+        status: "would-install",
+      });
+      continue;
+    }
+
+    // Custom installer (Cowork / Claude Desktop plugin bundle).
+    if (dest.entry?.customInstaller) {
+      const result = dest.entry.customInstaller.install({
+        env,
+        srcSkillDir: src,
+        slug: opts.slug,
+        name: skillName,
+        description: skillDescription,
+        pluginVersion,
+        force: opts.force,
+      });
+      entries.push({
+        platform: dest.platform,
+        label: dest.label,
+        installedTo: result.installedTo,
+        status: result.status,
+        reason: result.reason,
+      });
+      continue;
+    }
+
+    // Standard "<dir>/<slug>" copy.
     try {
-      if (opts.dryRun) {
-        entries.push({
-          platform: dest.platform,
-          label: dest.label,
-          installedTo,
-          status: "would-install",
-        });
-        continue;
-      }
+      const installedTo = dest.skillPath;
       if (fs.existsSync(installedTo)) {
         if (!opts.force) {
           entries.push({
@@ -129,8 +175,9 @@ export function install(opts: InstallOpts): InstallResult {
         }
         fs.rmSync(installedTo, { recursive: true, force: true });
       }
-      fs.mkdirSync(dest.root, { recursive: true });
-      copyIntoPlace(src, installedTo, opts.slug, dest.root);
+      const parentDir = path.dirname(installedTo);
+      fs.mkdirSync(parentDir, { recursive: true });
+      copyIntoPlace(src, installedTo, opts.slug, parentDir);
       entries.push({
         platform: dest.platform,
         label: dest.label,
@@ -141,7 +188,7 @@ export function install(opts: InstallOpts): InstallResult {
       entries.push({
         platform: dest.platform,
         label: dest.label,
-        installedTo,
+        installedTo: dest.skillPath,
         status: "error",
         reason: (err as Error).message,
       });
@@ -170,14 +217,26 @@ export type UninstallResult = {
 };
 
 export function uninstall(opts: UninstallOpts): UninstallResult {
+  const env = opts.env ?? realEnv();
   const destinations = resolveDestinations({
+    slug: opts.slug,
     targets: opts.targets,
     dir: opts.dir,
-    env: opts.env,
+    env,
   });
   const entries: UninstallEntry[] = [];
   for (const dest of destinations) {
-    const target = path.join(dest.root, opts.slug);
+    if (dest.entry?.customInstaller) {
+      const result = dest.entry.customInstaller.uninstall({ env, slug: opts.slug });
+      entries.push({
+        platform: dest.platform,
+        label: dest.label,
+        path: result.path,
+        removed: result.removed,
+      });
+      continue;
+    }
+    const target = dest.skillPath;
     if (!fs.existsSync(target)) {
       entries.push({ platform: dest.platform, label: dest.label, path: target, removed: false });
       continue;
@@ -188,8 +247,7 @@ export function uninstall(opts: UninstallOpts): UninstallResult {
   return { slug: opts.slug, entries };
 }
 
-// Stage in a sibling tmp dir, then rename. Avoids leaving a half-
-// copied skill folder behind if the copy is interrupted.
+// Stage in a sibling tmp dir, then rename.
 function copyIntoPlace(src: string, dest: string, slug: string, parent: string): void {
   const staging = fs.mkdtempSync(path.join(parent, `.${slug}-staging-`));
   try {
@@ -211,9 +269,29 @@ function copyDirRecursive(src: string, dest: string): void {
     } else if (entry.isFile()) {
       fs.copyFileSync(s, d);
     }
-    // Symlinks + special files: skip silently.
   }
 }
 
-/** Re-export so the CLI doesn't need to import from two modules. */
-export { getPlatform, parsePlatformIds, detectAllPlatforms } from "./platforms.js";
+/**
+ * Read our own package.json's `version` field. Used as the
+ * `plugin.json` version when installing into Cowork/Desktop plugin
+ * bundles, so Cowork can see updates as we bump the CLI.
+ */
+function detectPackageVersion(): string {
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(
+      fs.readFileSync(path.resolve(here, "..", "package.json"), "utf8"),
+    ) as { version?: string };
+    return pkg.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+/** Re-exports so the CLI doesn't have to import from two modules. */
+export {
+  parsePlatformIds,
+  detectAllPlatforms,
+  getPlatform,
+} from "./platforms.js";

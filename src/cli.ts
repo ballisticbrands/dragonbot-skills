@@ -96,7 +96,7 @@ function runListPlatforms(): number {
   const idWidth = Math.max(...PLATFORM_REGISTRY.map((p) => p.id.length));
   for (const p of PLATFORM_REGISTRY) {
     const tag = detected.has(p.id) ? "✓ detected" : "  (not detected)";
-    process.stdout.write(`  ${p.id.padEnd(idWidth, " ")}  ${tag}  ${p.label} → ${p.path(env)}\n`);
+    process.stdout.write(`  ${p.id.padEnd(idWidth, " ")}  ${tag}  ${p.label} → ${p.skillsRoot(env)}\n`);
   }
   process.stdout.write(
     "\nDefault install targets every detected platform. Override with " +
@@ -141,7 +141,7 @@ function runInstall(rest: string[]): number {
   // Preview the destinations before doing the work. If nothing was
   // detected and the user didn't override, explain it before
   // throwing — much nicer than a wall of text from the thrown error.
-  const previewDests = resolveDestinations({ targets, dir: flags.dir });
+  const previewDests = resolveDestinations({ slug, targets, dir: flags.dir });
   if (previewDests.length === 0) {
     process.stderr.write(
       "No supported AI coding platforms were detected on this machine.\n" +

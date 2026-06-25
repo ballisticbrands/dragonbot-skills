@@ -1,23 +1,33 @@
-// Registry of supported AI coding platforms — each entry knows where
-// to drop SKILL.md and how to tell whether the platform is installed
-// on this machine.
+// Registry of supported AI coding platforms — each entry knows
+// where to drop a skill folder and how to tell whether the platform
+// is installed on this machine.
 //
-// Design adapted from skills-hub.ai's @skills-hub-ai/cli
-// (https://www.npmjs.com/package/@skills-hub-ai/cli, MIT). They
-// pioneered the "auto-detect installed clients + install to every
-// one" UX for Claude-style skills; we're following their lead so a
-// user's existing muscle memory carries over.
+// Most platforms use the simple "<dir>/<slug>/SKILL.md" convention
+// (Claude Code, Cursor, Codex, etc.). A few use richer formats —
+// notably Cowork and Claude Desktop, which load skills as plugin
+// bundles (.claude-plugin/plugin.json + manifest.json + skills/<slug>).
+// For those, the entry carries a `customInstaller` callback that
+// owns the full install/uninstall flow.
 //
-// Add a platform: append to PLATFORM_REGISTRY. Tests + the install
-// command + the `list-platforms` command all read from this one
-// source of truth.
+// Standard-platform layout adapted from skills-hub.ai's
+// @skills-hub-ai/cli (MIT). They pioneered the auto-detect-and-
+// install-everywhere UX for Claude-style skills.
 
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
+import {
+  installToCowork,
+  uninstallFromCowork,
+  appPluginRoot,
+  bundleDir,
+} from "./cowork-plugin.js";
+
 export type KnownPlatform =
   | "claude-code"
+  | "claude-desktop"
+  | "cowork"
   | "cursor"
   | "codex"
   | "copilot"
@@ -28,17 +38,6 @@ export type KnownPlatform =
   | "gemini"
   | "roo"
   | "zed";
-
-export type PlatformRegistryEntry = {
-  id: KnownPlatform;
-  label: string;
-  // Where to write skill folders. Resolved at call-time (not at
-  // module-load) so tests can override $HOME / cwd.
-  path: (env: PlatformEnv) => string;
-  // Does this platform appear to be installed? Usually probes its
-  // config dir or a known marker file.
-  detect: (env: PlatformEnv) => boolean;
-};
 
 export type PlatformEnv = {
   home: string;
@@ -51,23 +50,111 @@ export function realEnv(): PlatformEnv {
 
 const has = (...segments: string[]) => fs.existsSync(path.join(...segments));
 
+// Inputs to a custom installer. The standard "copy <srcSkillDir>
+// into <skillsRoot>/<slug>" pattern is too narrow for Cowork
+// (which also needs to merge a manifest.json), so custom platforms
+// own the full flow.
+export type CustomInstallArgs = {
+  env: PlatformEnv;
+  srcSkillDir: string;
+  slug: string;
+  name: string;
+  description: string;
+  pluginVersion: string;
+  force?: boolean;
+};
+
+export type CustomInstallResult = {
+  installedTo: string;
+  status: "installed" | "skipped-exists" | "error";
+  reason?: string;
+};
+
+export type CustomUninstallArgs = {
+  env: PlatformEnv;
+  slug: string;
+};
+
+export type CustomUninstallResult = {
+  path: string;
+  removed: boolean;
+};
+
+export type CustomInstaller = {
+  install: (args: CustomInstallArgs) => CustomInstallResult;
+  uninstall: (args: CustomUninstallArgs) => CustomUninstallResult;
+};
+
+export type PlatformRegistryEntry = {
+  id: KnownPlatform;
+  label: string;
+  // Where skill folders ultimately live. Shown in `list-platforms`
+  // so users can see the target before installing.
+  skillsRoot: (env: PlatformEnv) => string;
+  // Is this platform installed on this machine?
+  detect: (env: PlatformEnv) => boolean;
+  // Override the default copy-to-<skillsRoot>/<slug> behavior.
+  // Required for plugin-bundle-style platforms (Cowork, Claude Desktop).
+  customInstaller?: CustomInstaller;
+};
+
+const coworkInstaller = (app: "claude-desktop" | "cowork"): CustomInstaller => ({
+  install: (args) => {
+    try {
+      const result = installToCowork({ app, ...args });
+      return {
+        installedTo: result.bundlePath,
+        status: result.installed ? "installed" : "skipped-exists",
+        reason: result.reason,
+      };
+    } catch (err) {
+      return {
+        installedTo: path.join(bundleDir(app, args.env), "skills", args.slug),
+        status: "error",
+        reason: (err as Error).message,
+      };
+    }
+  },
+  uninstall: (args) => {
+    const result = uninstallFromCowork({ app, ...args });
+    return { path: result.bundlePath, removed: result.removed };
+  },
+});
+
 export const PLATFORM_REGISTRY: PlatformRegistryEntry[] = [
   {
     id: "claude-code",
     label: "Claude Code",
-    path: (e) => path.join(e.home, ".claude", "skills"),
+    skillsRoot: (e) => path.join(e.home, ".claude", "skills"),
     detect: (e) => has(e.home, ".claude"),
+  },
+  {
+    id: "claude-desktop",
+    label: "Claude Desktop",
+    // Custom installer writes the plugin bundle; the "skillsRoot"
+    // we expose for list-platforms / dry-run is the bundle's
+    // skills/ subdir.
+    skillsRoot: (e) => path.join(bundleDir("claude-desktop", e), "skills"),
+    detect: (e) => fs.existsSync(appPluginRoot("claude-desktop", e)),
+    customInstaller: coworkInstaller("claude-desktop"),
+  },
+  {
+    id: "cowork",
+    label: "Claude Cowork",
+    skillsRoot: (e) => path.join(bundleDir("cowork", e), "skills"),
+    detect: (e) => fs.existsSync(appPluginRoot("cowork", e)),
+    customInstaller: coworkInstaller("cowork"),
   },
   {
     id: "cursor",
     label: "Cursor",
-    path: (e) => path.join(e.home, ".cursor", "skills"),
+    skillsRoot: (e) => path.join(e.home, ".cursor", "skills"),
     detect: (e) => has(e.home, ".cursor"),
   },
   {
     id: "codex",
     label: "Codex CLI",
-    path: (e) => path.join(e.home, ".codex", "skills"),
+    skillsRoot: (e) => path.join(e.home, ".codex", "skills"),
     detect: (e) => has(e.home, ".codex"),
   },
   {
@@ -77,7 +164,7 @@ export const PLATFORM_REGISTRY: PlatformRegistryEntry[] = [
     // we drop per-skill folders under .github/copilot/skills/ so the
     // user can opt them in via custom instructions without colliding
     // with the single documented file.
-    path: (e) => path.join(e.cwd, ".github", "copilot", "skills"),
+    skillsRoot: (e) => path.join(e.cwd, ".github", "copilot", "skills"),
     detect: (e) =>
       has(e.cwd, ".github", "copilot") ||
       has(e.cwd, ".github", "copilot-instructions.md"),
@@ -85,19 +172,19 @@ export const PLATFORM_REGISTRY: PlatformRegistryEntry[] = [
   {
     id: "windsurf",
     label: "Windsurf",
-    path: (e) => path.join(e.home, ".windsurf", "skills"),
+    skillsRoot: (e) => path.join(e.home, ".windsurf", "skills"),
     detect: (e) => has(e.home, ".windsurf") || has(e.cwd, ".windsurfrules"),
   },
   {
     id: "cline",
     label: "Cline",
-    path: (e) => path.join(e.home, ".cline", "skills"),
+    skillsRoot: (e) => path.join(e.home, ".cline", "skills"),
     detect: (e) => has(e.home, ".cline") || has(e.cwd, ".clinerules"),
   },
   {
     id: "opencode",
     label: "OpenCode",
-    path: (e) => path.join(e.home, ".opencode", "skills"),
+    skillsRoot: (e) => path.join(e.home, ".opencode", "skills"),
     detect: (e) => has(e.home, ".opencode"),
   },
   {
@@ -105,7 +192,7 @@ export const PLATFORM_REGISTRY: PlatformRegistryEntry[] = [
     label: "Continue",
     // Best-effort: Continue uses ~/.continue/config.json; the skills
     // subdir is not yet a documented loader location.
-    path: (e) => path.join(e.home, ".continue", "skills"),
+    skillsRoot: (e) => path.join(e.home, ".continue", "skills"),
     detect: (e) => has(e.home, ".continue"),
   },
   {
@@ -113,13 +200,13 @@ export const PLATFORM_REGISTRY: PlatformRegistryEntry[] = [
     label: "Gemini CLI",
     // Best-effort: ~/.gemini is the published config root; the
     // skills subdir is not (yet) documented.
-    path: (e) => path.join(e.home, ".gemini", "skills"),
+    skillsRoot: (e) => path.join(e.home, ".gemini", "skills"),
     detect: (e) => has(e.home, ".gemini"),
   },
   {
     id: "roo",
     label: "Roo Code",
-    path: (e) => path.join(e.home, ".roo", "skills"),
+    skillsRoot: (e) => path.join(e.home, ".roo", "skills"),
     detect: (e) => has(e.home, ".roo") || has(e.cwd, ".roorules"),
   },
   {
@@ -127,12 +214,12 @@ export const PLATFORM_REGISTRY: PlatformRegistryEntry[] = [
     label: "Zed",
     // macOS uses ~/Library/Application Support/Zed; Linux uses
     // ~/.config/zed. We pick per-platform at call time.
-    path: (e) => zedPath(e.home),
-    detect: (e) => fs.existsSync(path.dirname(zedPath(e.home))),
+    skillsRoot: (e) => zedSkillsRoot(e.home),
+    detect: (e) => fs.existsSync(path.dirname(zedSkillsRoot(e.home))),
   },
 ];
 
-function zedPath(home: string): string {
+function zedSkillsRoot(home: string): string {
   if (os.platform() === "darwin") {
     return path.join(home, "Library", "Application Support", "Zed", "skills");
   }
@@ -147,20 +234,10 @@ export function getPlatform(id: string): PlatformRegistryEntry | undefined {
   return PLATFORM_REGISTRY.find((p) => p.id === id);
 }
 
-/**
- * Return every platform that appears to be installed on this
- * machine. Order matches registry order, so Claude Code comes first
- * when multiple are present.
- */
 export function detectAllPlatforms(env: PlatformEnv = realEnv()): PlatformRegistryEntry[] {
   return PLATFORM_REGISTRY.filter((p) => p.detect(env));
 }
 
-/**
- * Parse a comma-separated list of platform IDs from the CLI's
- * --target flag. Splits into known + unknown so the caller can warn
- * the user about typos without silently dropping them.
- */
 export function parsePlatformIds(value: string): {
   known: PlatformRegistryEntry[];
   unknown: string[];

@@ -57,6 +57,8 @@ Default behavior: install to **every detected platform**. The registry:
 | Platform id | Install path | Detected by |
 |---|---|---|
 | `claude-code` | `~/.claude/skills/<slug>/` | `~/.claude` exists |
+| `claude-desktop` | Claude Desktop plugin bundle (see below) | `~/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin` exists |
+| `cowork` | Claude Cowork plugin bundle (see below) | `~/Library/Application Support/Claude-Work/local-agent-mode-sessions/skills-plugin` exists |
 | `cursor` | `~/.cursor/skills/<slug>/` | `~/.cursor` exists |
 | `codex` | `~/.codex/skills/<slug>/` | `~/.codex` exists |
 | `copilot` | `<cwd>/.github/copilot/skills/<slug>/` | `.github/copilot/` or `.github/copilot-instructions.md` |
@@ -71,6 +73,34 @@ Default behavior: install to **every detected platform**. The registry:
 Some paths are best-effort (the platform hasn't documented a canonical
 skills directory). They're marked in the source — open an issue if
 you know better.
+
+### Cowork / Claude Desktop plugin bundle
+
+Cowork and Claude Desktop don't read from `~/.claude/skills/`. They
+load skills as **plugin bundles** at:
+
+```
+~/Library/Application Support/<App>/local-agent-mode-sessions/skills-plugin/
+  <plugin-uuid>/<snapshot-uuid>/
+    .claude-plugin/plugin.json   { name, version, description }
+    manifest.json                 { lastUpdated, skills: [...] }
+    skills/<slug>/SKILL.md        (+ nested files)
+```
+
+We ship all our skills as a single bundle named `dragonbot-skills`.
+The plugin + snapshot UUIDs are hardcoded so reinstalls + the
+manifest merge always land in the same place. Installing skill
+`<slug>`:
+- creates the bundle dir if missing
+- (re)writes `plugin.json` with the current CLI version
+- merges the skill's entry into `manifest.json` (`creatorType: "third-party"`, `enabled: true`)
+- copies the skill folder into `skills/<slug>/`
+
+Best-effort caveat: Cowork's plugin layout is reverse-engineered
+from its bundled `anthropic-skills` plugin. Cowork may need a
+restart to pick up newly-installed skills, and an in-app
+resync/update could in theory overwrite the bundle. If you hit a
+case where it doesn't load, file an issue.
 
 Run `dragonbot-skills list-platforms` on your machine to see what's
 detected and where each install would land.
