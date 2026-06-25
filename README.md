@@ -1,36 +1,42 @@
 # @dragonbot-skills/cli
 
-Install [Claude skills](https://docs.anthropic.com/) from the DragonBot
-catalog into your local Claude environment.
+Install Claude skills from the DragonBot catalog into every AI coding
+tool you use, with one command:
 
 ```bash
 npx @dragonbot-skills/cli install amazon-kw-research
 ```
 
-That single command drops `amazon-kw-research/SKILL.md` (plus any
-references and scripts) into `~/.claude/skills/amazon-kw-research/`,
-where Claude Code (and other Claude clients that follow the same
-convention) will pick it up automatically.
+That auto-detects every AI coding platform installed on your machine
+(Claude Code, Cursor, Codex CLI, GitHub Copilot, Windsurf, Cline,
+OpenCode, Continue, Gemini CLI, Roo, Zed) and drops the skill folder
+into each one's skills directory. Install once, available everywhere.
 
 ## Commands
 
 ```bash
-# What's in the catalog?
+# What skills are in the catalog?
 dragonbot-skills list
 
-# Install a skill (user-scope: ~/.claude/skills/<slug>/)
+# What platforms am I targeting?
+dragonbot-skills list-platforms
+
+# Install (auto-detects every supported platform)
 dragonbot-skills install amazon-kw-research
 
-# Install for one repo only (./.claude/skills/<slug>/)
-dragonbot-skills install amazon-kw-research --project
+# Scope to specific platforms
+dragonbot-skills install amazon-kw-research --target claude-code,cursor
 
-# Install somewhere custom
-dragonbot-skills install amazon-kw-research --target ~/my-claude-skills
+# Install to a raw directory (useful for clients we don't recognize yet)
+dragonbot-skills install amazon-kw-research --dir ./.claude/skills
+
+# Preview what would happen, write nothing
+dragonbot-skills install amazon-kw-research --dry-run
 
 # Reinstall over an existing copy
 dragonbot-skills install amazon-kw-research --force
 
-# Remove
+# Remove (also multi-platform by default)
 dragonbot-skills uninstall amazon-kw-research
 ```
 
@@ -42,33 +48,44 @@ dragonbot-skills uninstall amazon-kw-research
 |---|---|
 | `amazon-kw-research` | Amazon keyword research → workbook + PPC setup (uses Keepa + Jungle Scout via the DragonBot MCP). |
 
-More skills will be added here — file a PR or run `dragonbot-skills list`
-after upgrading.
+Catalog grows over time — run `dragonbot-skills list` after upgrading.
 
 ## Where it installs
 
-| Scope | Path | When to use |
-|---|---|---|
-| `user` *(default)* | `~/.claude/skills/<slug>/` | one install, every project on this machine sees it |
-| `--project` | `<cwd>/.claude/skills/<slug>/` | this repo only |
-| `--target <dir>` | `<dir>/<slug>/` | custom — for clients that use a different skills directory |
+Default behavior: install to **every detected platform**. The registry:
 
-Skills installed here are picked up by Claude Code automatically. Other
-Claude clients (Desktop, Cowork, etc.) that follow the `.claude/skills/`
-convention work the same way; if yours reads from a different path, use
-`--target`.
+| Platform id | Install path | Detected by |
+|---|---|---|
+| `claude-code` | `~/.claude/skills/<slug>/` | `~/.claude` exists |
+| `cursor` | `~/.cursor/skills/<slug>/` | `~/.cursor` exists |
+| `codex` | `~/.codex/skills/<slug>/` | `~/.codex` exists |
+| `copilot` | `<cwd>/.github/copilot/skills/<slug>/` | `.github/copilot/` or `.github/copilot-instructions.md` |
+| `windsurf` | `~/.windsurf/skills/<slug>/` | `~/.windsurf` or `.windsurfrules` |
+| `cline` | `~/.cline/skills/<slug>/` | `~/.cline` or `.clinerules` |
+| `opencode` | `~/.opencode/skills/<slug>/` | `~/.opencode` exists |
+| `continue` | `~/.continue/skills/<slug>/` | `~/.continue` exists |
+| `gemini` | `~/.gemini/skills/<slug>/` | `~/.gemini` exists |
+| `roo` | `~/.roo/skills/<slug>/` | `~/.roo` or `.roorules` |
+| `zed` | `~/Library/Application Support/Zed/skills/<slug>/` (macOS) | parent dir exists |
+
+Some paths are best-effort (the platform hasn't documented a canonical
+skills directory). They're marked in the source — open an issue if
+you know better.
+
+Run `dragonbot-skills list-platforms` on your machine to see what's
+detected and where each install would land.
 
 ## Updating
 
-Skills are bundled with this package, so updating is just `npx`-ing the
-latest version:
+Skills are bundled with this package, so upgrading is just re-running
+`npx` with `@latest`:
 
 ```bash
 npx @dragonbot-skills/cli@latest install amazon-kw-research --force
 ```
 
 `--force` is needed because we won't silently overwrite an existing
-install. (No, we don't auto-update — installs are explicit.)
+install.
 
 ## Development
 
@@ -77,14 +94,21 @@ npm install
 npm run typecheck
 npm test
 npm run build        # → dist/cli.js (chmod +x)
-node dist/cli.js list
+node dist/cli.js list-platforms
 ```
 
 Skills live in `skills/<slug>/SKILL.md` at the package root. Adding a
-new skill = adding a new folder there with a `SKILL.md` containing
+new skill = adding a folder there with a `SKILL.md` containing
 frontmatter (`name:`, `description:`) and a markdown body. The
 `bundledRoot` test override pattern in `src/install.test.ts` lets you
 unit-test against synthetic skills without touching the real catalog.
+
+## Credits
+
+The auto-detect-and-install-everywhere pattern is adapted from
+[skills-hub.ai](https://skills-hub.ai)'s
+[@skills-hub-ai/cli](https://www.npmjs.com/package/@skills-hub-ai/cli)
+(MIT). They pioneered this UX for Claude-style skills.
 
 ## License
 

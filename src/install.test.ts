@@ -1,4 +1,4 @@
-// Unit tests for the install/uninstall flow.
+// Unit tests for the install/uninstall flow + platform detection.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -6,7 +6,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { install, uninstall, resolveSkillsRoot } from "./install.js";
+import { install, uninstall, resolveDestinations } from "./install.js";
+import {
+  PLATFORM_REGISTRY,
+  ALL_PLATFORM_IDS,
+  detectAllPlatforms,
+  parsePlatformIds,
+  getPlatform,
+} from "./platforms.js";
 import { listBundledSkills, findBundledSkill } from "./skills.js";
 
 const SAMPLE_SKILL = `---
@@ -14,15 +21,10 @@ name: amazon-keyword-research
 description: Amazon keyword research for product listings and PPC.
 ---
 
-# Amazon Keyword Research Skill
-Body.
+# Body
 `;
 
 function mkBundledRoot(layout: Record<string, string>): string {
-  // layout keys are "<slug>/<relative-path>". Write each as a file
-  // under a fresh temp dir. Returns that dir — used as `bundledRoot`
-  // override on install() / findBundledSkill() so we don't depend
-  // on the package's real bundled catalog in unit tests.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-bundled-"));
   for (const [rel, body] of Object.entries(layout)) {
     const abs = path.join(root, rel);
@@ -32,149 +34,255 @@ function mkBundledRoot(layout: Record<string, string>): string {
   return root;
 }
 
-function mkTmpDir(prefix: string): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `dbskills-${prefix}-`));
+function mkTmpHome(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-home-"));
 }
 
-// ─── resolveSkillsRoot ─────────────────────────────────────────────
+// ─── Platform detection ────────────────────────────────────────────
 
-test("resolveSkillsRoot defaults to user scope at ~/.claude/skills", () => {
-  const r = resolveSkillsRoot({ home: "/h", cwd: "/c" });
-  assert.equal(r.scope, "user");
-  assert.equal(r.root, path.join("/h", ".claude", "skills"));
+test("detectAllPlatforms returns empty when no client config dirs exist", () => {
+  const home = mkTmpHome();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
+  const detected = detectAllPlatforms({ home, cwd });
+  assert.deepEqual(detected, []);
 });
 
-test("resolveSkillsRoot honors --project (./.claude/skills under cwd)", () => {
-  const r = resolveSkillsRoot({ scope: "project", home: "/h", cwd: "/c" });
-  assert.equal(r.scope, "project");
-  assert.equal(r.root, path.join("/c", ".claude", "skills"));
+test("detectAllPlatforms finds claude-code when ~/.claude exists", () => {
+  const home = mkTmpHome();
+  fs.mkdirSync(path.join(home, ".claude"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
+  const detected = detectAllPlatforms({ home, cwd });
+  assert.equal(detected.length, 1);
+  assert.equal(detected[0]!.id, "claude-code");
 });
 
-test("resolveSkillsRoot --target overrides scope and resolves to absolute", () => {
-  const r = resolveSkillsRoot({ targetDir: "/custom/path", home: "/h", cwd: "/c" });
-  assert.equal(r.scope, "custom");
-  assert.equal(r.root, "/custom/path");
+test("detectAllPlatforms finds every installed client", () => {
+  const home = mkTmpHome();
+  fs.mkdirSync(path.join(home, ".claude"));
+  fs.mkdirSync(path.join(home, ".cursor"));
+  fs.mkdirSync(path.join(home, ".codex"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
+  const ids = detectAllPlatforms({ home, cwd }).map((p) => p.id);
+  assert.ok(ids.includes("claude-code"));
+  assert.ok(ids.includes("cursor"));
+  assert.ok(ids.includes("codex"));
+});
+
+test("detectAllPlatforms finds cwd-based clients (copilot via .github/copilot)", () => {
+  const home = mkTmpHome();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
+  fs.mkdirSync(path.join(cwd, ".github", "copilot"), { recursive: true });
+  const ids = detectAllPlatforms({ home, cwd }).map((p) => p.id);
+  assert.ok(ids.includes("copilot"));
+});
+
+test("parsePlatformIds separates known from unknown", () => {
+  const { known, unknown } = parsePlatformIds("claude-code,unknown-thing,cursor");
+  assert.deepEqual(known.map((p) => p.id), ["claude-code", "cursor"]);
+  assert.deepEqual(unknown, ["unknown-thing"]);
+});
+
+test("every PLATFORM_REGISTRY entry has a consistent id + path + detect", () => {
+  for (const entry of PLATFORM_REGISTRY) {
+    assert.ok(ALL_PLATFORM_IDS.includes(entry.id));
+    assert.equal(getPlatform(entry.id), entry);
+    assert.equal(typeof entry.path, "function");
+    assert.equal(typeof entry.detect, "function");
+    assert.ok(entry.label.length > 0);
+  }
+});
+
+// ─── resolveDestinations ───────────────────────────────────────────
+
+test("resolveDestinations: --dir overrides everything", () => {
+  const dests = resolveDestinations({ dir: "/custom/path" });
+  assert.equal(dests.length, 1);
+  assert.equal(dests[0]!.platform, "custom");
+  assert.equal(dests[0]!.root, "/custom/path");
+});
+
+test("resolveDestinations: explicit targets resolve to their platform paths", () => {
+  const home = mkTmpHome();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
+  const targets = [getPlatform("claude-code")!, getPlatform("cursor")!];
+  const dests = resolveDestinations({ targets, env: { home, cwd } });
+  assert.equal(dests.length, 2);
+  assert.equal(dests[0]!.root, path.join(home, ".claude", "skills"));
+  assert.equal(dests[1]!.root, path.join(home, ".cursor", "skills"));
+});
+
+test("resolveDestinations: no targets + no dir → auto-detect", () => {
+  const home = mkTmpHome();
+  fs.mkdirSync(path.join(home, ".claude"));
+  fs.mkdirSync(path.join(home, ".cursor"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
+  const dests = resolveDestinations({ env: { home, cwd } });
+  assert.deepEqual(
+    dests.map((d) => d.platform).sort(),
+    ["claude-code", "cursor"],
+  );
 });
 
 // ─── install ───────────────────────────────────────────────────────
 
-test("install copies the bundled skill folder to the chosen scope", () => {
+test("install: writes to every detected platform by default", () => {
   const bundled = mkBundledRoot({
     "amazon-kw-research/SKILL.md": SAMPLE_SKILL,
     "amazon-kw-research/references/foo.md": "ref",
-    "amazon-kw-research/scripts/run.sh": "#!/bin/sh\necho hi\n",
   });
-  const home = mkTmpDir("home");
+  const home = mkTmpHome();
+  fs.mkdirSync(path.join(home, ".claude"));
+  fs.mkdirSync(path.join(home, ".cursor"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
 
   const result = install({
     slug: "amazon-kw-research",
     bundledRoot: bundled,
-    home,
+    env: { home, cwd },
   });
-
-  assert.equal(result.scope, "user");
-  assert.equal(
-    result.installedTo,
-    path.join(home, ".claude", "skills", "amazon-kw-research"),
-  );
-  assert.ok(fs.existsSync(path.join(result.installedTo, "SKILL.md")));
-  assert.ok(fs.existsSync(path.join(result.installedTo, "references", "foo.md")));
-  assert.ok(fs.existsSync(path.join(result.installedTo, "scripts", "run.sh")));
-  assert.equal(
-    fs.readFileSync(path.join(result.installedTo, "SKILL.md"), "utf8"),
-    SAMPLE_SKILL,
-  );
+  const installed = result.entries.filter((e) => e.status === "installed");
+  assert.equal(installed.length, 2);
+  for (const e of installed) {
+    assert.ok(fs.existsSync(path.join(e.installedTo, "SKILL.md")));
+    assert.ok(fs.existsSync(path.join(e.installedTo, "references", "foo.md")));
+  }
 });
 
-test("install --project writes to <cwd>/.claude/skills/<slug>", () => {
+test("install: --target scopes to listed platforms only", () => {
   const bundled = mkBundledRoot({ "amazon-kw-research/SKILL.md": SAMPLE_SKILL });
-  const cwd = mkTmpDir("cwd");
+  const home = mkTmpHome();
+  fs.mkdirSync(path.join(home, ".claude"));
+  fs.mkdirSync(path.join(home, ".cursor"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
 
   const result = install({
     slug: "amazon-kw-research",
-    scope: "project",
+    targets: [getPlatform("claude-code")!],
     bundledRoot: bundled,
-    cwd,
+    env: { home, cwd },
   });
-
-  assert.equal(result.scope, "project");
-  assert.equal(
-    result.installedTo,
-    path.join(cwd, ".claude", "skills", "amazon-kw-research"),
-  );
+  assert.equal(result.entries.length, 1);
+  assert.equal(result.entries[0]!.platform, "claude-code");
+  assert.ok(fs.existsSync(path.join(home, ".claude", "skills", "amazon-kw-research", "SKILL.md")));
+  // cursor must NOT have been touched.
+  assert.ok(!fs.existsSync(path.join(home, ".cursor", "skills", "amazon-kw-research")));
 });
 
-test("install --target writes directly under the given directory", () => {
+test("install: --dir routes to a raw directory regardless of detection", () => {
   const bundled = mkBundledRoot({ "amazon-kw-research/SKILL.md": SAMPLE_SKILL });
-  const target = mkTmpDir("target");
+  const home = mkTmpHome();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
+  const customDir = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-custom-"));
 
   const result = install({
     slug: "amazon-kw-research",
-    targetDir: target,
+    dir: customDir,
     bundledRoot: bundled,
+    env: { home, cwd },
   });
-
-  assert.equal(result.scope, "custom");
-  assert.equal(result.installedTo, path.join(target, "amazon-kw-research"));
+  assert.equal(result.entries.length, 1);
+  assert.equal(result.entries[0]!.platform, "custom");
+  assert.ok(fs.existsSync(path.join(customDir, "amazon-kw-research", "SKILL.md")));
 });
 
-test("install refuses to overwrite an existing install without --force", () => {
+test("install: --dry-run returns would-install entries without writing", () => {
   const bundled = mkBundledRoot({ "amazon-kw-research/SKILL.md": SAMPLE_SKILL });
-  const home = mkTmpDir("home");
+  const home = mkTmpHome();
+  fs.mkdirSync(path.join(home, ".claude"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
 
-  install({ slug: "amazon-kw-research", bundledRoot: bundled, home });
+  const result = install({
+    slug: "amazon-kw-research",
+    bundledRoot: bundled,
+    env: { home, cwd },
+    dryRun: true,
+  });
+  assert.equal(result.entries[0]!.status, "would-install");
+  assert.ok(!fs.existsSync(path.join(home, ".claude", "skills", "amazon-kw-research")));
+});
+
+test("install: existing destination → skipped-exists without --force", () => {
+  const bundled = mkBundledRoot({ "amazon-kw-research/SKILL.md": SAMPLE_SKILL });
+  const home = mkTmpHome();
+  fs.mkdirSync(path.join(home, ".claude"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
+
+  install({ slug: "amazon-kw-research", bundledRoot: bundled, env: { home, cwd } });
+  const second = install({ slug: "amazon-kw-research", bundledRoot: bundled, env: { home, cwd } });
+  assert.equal(second.entries[0]!.status, "skipped-exists");
+});
+
+test("install: --force overwrites an existing install (and wipes stale files)", () => {
+  const bundled = mkBundledRoot({ "amazon-kw-research/SKILL.md": SAMPLE_SKILL });
+  const home = mkTmpHome();
+  fs.mkdirSync(path.join(home, ".claude"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
+
+  install({ slug: "amazon-kw-research", bundledRoot: bundled, env: { home, cwd } });
+  const installed = path.join(home, ".claude", "skills", "amazon-kw-research");
+  fs.writeFileSync(path.join(installed, "stale.txt"), "stale");
+
+  const second = install({
+    slug: "amazon-kw-research",
+    bundledRoot: bundled,
+    env: { home, cwd },
+    force: true,
+  });
+  assert.equal(second.entries[0]!.status, "installed");
+  assert.ok(!fs.existsSync(path.join(installed, "stale.txt")));
+  assert.ok(fs.existsSync(path.join(installed, "SKILL.md")));
+});
+
+test("install: throws when slug is not bundled", () => {
+  const bundled = mkBundledRoot({ "amazon-kw-research/SKILL.md": SAMPLE_SKILL });
+  const home = mkTmpHome();
+  fs.mkdirSync(path.join(home, ".claude"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
   assert.throws(
-    () => install({ slug: "amazon-kw-research", bundledRoot: bundled, home }),
-    /already exists.*--force/,
-  );
-});
-
-test("install --force replaces an existing install", () => {
-  const bundled = mkBundledRoot({ "amazon-kw-research/SKILL.md": SAMPLE_SKILL });
-  const home = mkTmpDir("home");
-
-  install({ slug: "amazon-kw-research", bundledRoot: bundled, home });
-  // Put a stray file in the existing dir — should NOT survive --force.
-  const dest = path.join(home, ".claude", "skills", "amazon-kw-research");
-  fs.writeFileSync(path.join(dest, "stale.txt"), "stale");
-
-  install({ slug: "amazon-kw-research", bundledRoot: bundled, home, force: true });
-  assert.ok(!fs.existsSync(path.join(dest, "stale.txt")));
-  assert.ok(fs.existsSync(path.join(dest, "SKILL.md")));
-});
-
-test("install throws when the slug is not bundled", () => {
-  const bundled = mkBundledRoot({ "amazon-kw-research/SKILL.md": SAMPLE_SKILL });
-  const home = mkTmpDir("home");
-  assert.throws(
-    () => install({ slug: "ghost-skill", bundledRoot: bundled, home }),
+    () => install({ slug: "ghost", bundledRoot: bundled, env: { home, cwd } }),
     /Skill not found/,
+  );
+});
+
+test("install: throws with a helpful message when no platforms are detected and no override", () => {
+  const bundled = mkBundledRoot({ "amazon-kw-research/SKILL.md": SAMPLE_SKILL });
+  const home = mkTmpHome();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
+  assert.throws(
+    () => install({ slug: "amazon-kw-research", bundledRoot: bundled, env: { home, cwd } }),
+    /No install destinations resolved/,
   );
 });
 
 // ─── uninstall ─────────────────────────────────────────────────────
 
-test("uninstall removes a previously-installed skill", () => {
+test("uninstall: removes from every detected platform that has the skill", () => {
   const bundled = mkBundledRoot({ "amazon-kw-research/SKILL.md": SAMPLE_SKILL });
-  const home = mkTmpDir("home");
+  const home = mkTmpHome();
+  fs.mkdirSync(path.join(home, ".claude"));
+  fs.mkdirSync(path.join(home, ".cursor"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
 
-  install({ slug: "amazon-kw-research", bundledRoot: bundled, home });
-  const result = uninstall({ slug: "amazon-kw-research", home });
-
-  assert.equal(result.removed, true);
-  assert.ok(!fs.existsSync(result.path));
+  install({ slug: "amazon-kw-research", bundledRoot: bundled, env: { home, cwd } });
+  const result = uninstall({ slug: "amazon-kw-research", env: { home, cwd } });
+  const removed = result.entries.filter((e) => e.removed);
+  assert.equal(removed.length, 2);
+  for (const e of removed) {
+    assert.ok(!fs.existsSync(e.path));
+  }
 });
 
-test("uninstall is a no-op when nothing is installed", () => {
-  const home = mkTmpDir("home");
-  const result = uninstall({ slug: "ghost", home });
-  assert.equal(result.removed, false);
+test("uninstall: no-op entries when the skill wasn't installed on that platform", () => {
+  const home = mkTmpHome();
+  fs.mkdirSync(path.join(home, ".claude"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
+  const result = uninstall({ slug: "ghost", env: { home, cwd } });
+  assert.equal(result.entries[0]!.removed, false);
 });
 
 // ─── bundled catalog sanity check ──────────────────────────────────
 // Real bundled `skills/` must contain amazon-kw-research with valid
-// frontmatter. This is the only test that touches the actual package
-// payload — if you rename or remove the skill, this fails loudly.
+// frontmatter. The only test that touches the actual package payload.
 
 test("the bundled catalog contains amazon-kw-research", () => {
   const skills = listBundledSkills();

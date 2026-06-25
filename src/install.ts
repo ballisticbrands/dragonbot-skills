@@ -1,71 +1,83 @@
-// Install / uninstall skills into the user's local Claude skills
-// directory.
+// Install / uninstall skills across one or more AI-coding platforms.
 //
-// Claude Code reads skills from two locations:
-//   user-scope    ~/.claude/skills/<slug>/SKILL.md
-//   project-scope <cwd>/.claude/skills/<slug>/SKILL.md
+// Default behavior (no --target): auto-detect every installed
+// platform (Claude Code, Cursor, Codex, Copilot, ...) and write the
+// skill to each one. This matches the user's mental model from
+// other skills hubs ("install the skill, it shows up everywhere").
 //
-// We default to user-scope (one install, every project sees it) and
-// expose `--project` for the per-repo variant. `--target <dir>`
-// overrides both — useful for other Claude clients (Cowork, Desktop)
-// that put their skills directory somewhere else.
+// Override with `--target claude-code,cursor` (specific platforms)
+// or `--dir <path>` (raw directory — useful for clients we don't
+// have in the registry yet).
 //
-// Install is atomic-ish: copy to a temp directory next to the
-// destination, then rename into place. If the destination already
-// exists we refuse without `--force` — a real reinstall should be
-// explicit, not silent.
+// Each install is atomic-ish: copy to a staging dir next to the
+// destination, then rename. We refuse to overwrite an existing
+// install without --force — silent reinstalls hide problems.
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { findBundledSkill } from "./skills.js";
-
-export type Scope = "user" | "project";
+import {
+  detectAllPlatforms,
+  realEnv,
+  type PlatformEnv,
+  type PlatformRegistryEntry,
+} from "./platforms.js";
 
 export type InstallOpts = {
   slug: string;
-  scope?: Scope;       // default "user"
-  targetDir?: string;  // overrides scope (raw skills/ root path)
-  force?: boolean;     // overwrite existing install
-  cwd?: string;        // for tests; defaults to process.cwd()
-  home?: string;       // for tests; defaults to os.homedir()
-  bundledRoot?: string; // for tests; defaults to bundled skills/ in the package
+  // EXACTLY ONE of these three controls the destination(s):
+  //   - targets:  explicit platform IDs (e.g. ["claude-code", "cursor"])
+  //   - dir:      raw directory (e.g. "./.claude/skills")
+  //   - (none):   auto-detect every installed platform
+  targets?: PlatformRegistryEntry[];
+  dir?: string;
+  force?: boolean;
+  dryRun?: boolean;
+  // Test-only overrides; never set in production code paths.
+  env?: PlatformEnv;
+  bundledRoot?: string;
+};
+
+export type InstallEntry = {
+  // Platform id, or "custom" when --dir was used.
+  platform: string;
+  label: string;
+  installedTo: string;
+  status: "installed" | "skipped-exists" | "would-install" | "error";
+  reason?: string;
 };
 
 export type InstallResult = {
-  installedTo: string; // absolute path to <skills-root>/<slug>/
-  scope: Scope | "custom";
+  slug: string;
+  entries: InstallEntry[];
 };
 
 /**
- * Resolve the skills directory the CLI should write into for a
- * given scope. Doesn't create the directory — install() does that.
+ * Resolve the list of destinations for an install call. Single
+ * function so the CLI can show "what would I install where" in
+ * --dry-run mode without duplicating the resolution logic.
  */
-export function resolveSkillsRoot(opts: {
-  scope?: Scope;
-  targetDir?: string;
-  cwd?: string;
-  home?: string;
-}): { root: string; scope: Scope | "custom" } {
-  if (opts.targetDir) {
-    return { root: path.resolve(opts.targetDir), scope: "custom" };
+export function resolveDestinations(opts: {
+  targets?: PlatformRegistryEntry[];
+  dir?: string;
+  env?: PlatformEnv;
+}): Array<{ platform: string; label: string; root: string }> {
+  const env = opts.env ?? realEnv();
+
+  if (opts.dir) {
+    return [
+      { platform: "custom", label: "Custom directory", root: path.resolve(opts.dir) },
+    ];
   }
-  const scope = opts.scope ?? "user";
-  if (scope === "project") {
-    const cwd = opts.cwd ?? process.cwd();
-    return { root: path.join(cwd, ".claude", "skills"), scope: "project" };
-  }
-  const home = opts.home ?? os.homedir();
-  return { root: path.join(home, ".claude", "skills"), scope: "user" };
+  const platforms = opts.targets ?? detectAllPlatforms(env);
+  return platforms.map((p) => ({
+    platform: p.id,
+    label: p.label,
+    root: p.path(env),
+  }));
 }
 
-/**
- * Copy the bundled skill folder for `slug` into the chosen skills
- * directory. Throws when:
- *   - the slug isn't bundled in this package
- *   - the destination exists and `force` is false
- */
 export function install(opts: InstallOpts): InstallResult {
   const src = findBundledSkill(opts.slug, opts.bundledRoot);
   if (!src) {
@@ -75,28 +87,111 @@ export function install(opts: InstallOpts): InstallResult {
     );
   }
 
-  const { root, scope } = resolveSkillsRoot({
-    scope: opts.scope,
-    targetDir: opts.targetDir,
-    cwd: opts.cwd,
-    home: opts.home,
+  const destinations = resolveDestinations({
+    targets: opts.targets,
+    dir: opts.dir,
+    env: opts.env,
   });
-  const dest = path.join(root, opts.slug);
 
-  if (fs.existsSync(dest)) {
-    if (!opts.force) {
-      throw new Error(
-        `${dest} already exists. Pass --force to overwrite.`,
-      );
-    }
-    fs.rmSync(dest, { recursive: true, force: true });
+  if (destinations.length === 0) {
+    throw new Error(
+      "No install destinations resolved. None of the supported AI " +
+        "coding platforms were detected on this machine. Pass " +
+        "--target claude-code (or another platform id, see " +
+        "`dragonbot-skills list-platforms`) or --dir <path> to " +
+        "install anyway.",
+    );
   }
 
-  fs.mkdirSync(root, { recursive: true });
+  const entries: InstallEntry[] = [];
+  for (const dest of destinations) {
+    const installedTo = path.join(dest.root, opts.slug);
+    try {
+      if (opts.dryRun) {
+        entries.push({
+          platform: dest.platform,
+          label: dest.label,
+          installedTo,
+          status: "would-install",
+        });
+        continue;
+      }
+      if (fs.existsSync(installedTo)) {
+        if (!opts.force) {
+          entries.push({
+            platform: dest.platform,
+            label: dest.label,
+            installedTo,
+            status: "skipped-exists",
+            reason: "destination exists; pass --force to overwrite",
+          });
+          continue;
+        }
+        fs.rmSync(installedTo, { recursive: true, force: true });
+      }
+      fs.mkdirSync(dest.root, { recursive: true });
+      copyIntoPlace(src, installedTo, opts.slug, dest.root);
+      entries.push({
+        platform: dest.platform,
+        label: dest.label,
+        installedTo,
+        status: "installed",
+      });
+    } catch (err) {
+      entries.push({
+        platform: dest.platform,
+        label: dest.label,
+        installedTo,
+        status: "error",
+        reason: (err as Error).message,
+      });
+    }
+  }
+  return { slug: opts.slug, entries };
+}
 
-  // Stage in a sibling tmp dir, then rename. Avoids leaving a half-
-  // copied skill folder behind if the copy is interrupted.
-  const staging = fs.mkdtempSync(path.join(root, `.${opts.slug}-staging-`));
+export type UninstallOpts = {
+  slug: string;
+  targets?: PlatformRegistryEntry[];
+  dir?: string;
+  env?: PlatformEnv;
+};
+
+export type UninstallEntry = {
+  platform: string;
+  label: string;
+  path: string;
+  removed: boolean;
+};
+
+export type UninstallResult = {
+  slug: string;
+  entries: UninstallEntry[];
+};
+
+export function uninstall(opts: UninstallOpts): UninstallResult {
+  const destinations = resolveDestinations({
+    targets: opts.targets,
+    dir: opts.dir,
+    env: opts.env,
+  });
+  const entries: UninstallEntry[] = [];
+  for (const dest of destinations) {
+    const target = path.join(dest.root, opts.slug);
+    if (!fs.existsSync(target)) {
+      entries.push({ platform: dest.platform, label: dest.label, path: target, removed: false });
+      continue;
+    }
+    fs.rmSync(target, { recursive: true, force: true });
+    entries.push({ platform: dest.platform, label: dest.label, path: target, removed: true });
+  }
+  return { slug: opts.slug, entries };
+}
+
+// Stage in a sibling tmp dir, then rename. Avoids leaving a half-
+// copied skill folder behind if the copy is interrupted.
+function copyIntoPlace(src: string, dest: string, slug: string, parent: string): void {
+  const staging = fs.mkdtempSync(path.join(parent, `.${slug}-staging-`));
   try {
     copyDirRecursive(src, staging);
     fs.renameSync(staging, dest);
@@ -104,46 +199,8 @@ export function install(opts: InstallOpts): InstallResult {
     fs.rmSync(staging, { recursive: true, force: true });
     throw err;
   }
-
-  return { installedTo: dest, scope };
 }
 
-export type UninstallOpts = {
-  slug: string;
-  scope?: Scope;
-  targetDir?: string;
-  cwd?: string;
-  home?: string;
-};
-
-export type UninstallResult = {
-  removed: boolean;     // false if nothing was there to begin with
-  path: string;
-  scope: Scope | "custom";
-};
-
-/**
- * Remove the installed skill folder. Idempotent: returns
- * `removed: false` (no error) when the folder isn't present.
- */
-export function uninstall(opts: UninstallOpts): UninstallResult {
-  const { root, scope } = resolveSkillsRoot({
-    scope: opts.scope,
-    targetDir: opts.targetDir,
-    cwd: opts.cwd,
-    home: opts.home,
-  });
-  const dest = path.join(root, opts.slug);
-  if (!fs.existsSync(dest)) {
-    return { removed: false, path: dest, scope };
-  }
-  fs.rmSync(dest, { recursive: true, force: true });
-  return { removed: true, path: dest, scope };
-}
-
-// Minimal recursive copy — no externals, follows directories and
-// regular files only. Symlinks aren't expected in skills today; if
-// we ever ship one, switch to fs.cp({ recursive: true, verbatimSymlinks: true }).
 function copyDirRecursive(src: string, dest: string): void {
   fs.mkdirSync(dest, { recursive: true });
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
@@ -157,3 +214,6 @@ function copyDirRecursive(src: string, dest: string): void {
     // Symlinks + special files: skip silently.
   }
 }
+
+/** Re-export so the CLI doesn't need to import from two modules. */
+export { getPlatform, parsePlatformIds, detectAllPlatforms } from "./platforms.js";

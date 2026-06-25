@@ -1,6 +1,6 @@
 {
   "name": "@dragonbot-skills/cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Install DragonBot skills (Amazon keyword research, etc.) into your local Claude environment.",
   "type": "module",
   "bin": {
