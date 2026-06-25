@@ -1,0 +1,39 @@
+{
+  "name": "@dragonbot-skills/cli",
+  "version": "0.1.0",
+  "description": "Install DragonBot skills (Amazon keyword research, etc.) into your local Claude environment.",
+  "type": "module",
+  "bin": {
+    "dragonbot-skills": "dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "skills/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/cli.js",
+    "prepublishOnly": "npm run build",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --import tsx 'src/**/*.test.ts'",
+    "dev": "tsx src/cli.ts"
+  },
+  "keywords": [
+    "claude",
+    "claude-skills",
+    "anthropic",
+    "amazon",
+    "keyword-research",
+    "dragonbot"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
