@@ -12,6 +12,18 @@ That auto-detects every AI coding platform installed on your machine
 OpenCode, Continue, Gemini CLI, Roo, Zed) and drops the skill folder
 into each one's skills directory. Install once, available everywhere.
 
+You install by the bare catalog slug (`amazon-kw-research`), but every
+skill lands **namespaced with a `dragonbot-` prefix** — the example
+above installs `dragonbot-amazon-kw-research` (folder and skill name),
+so DragonBot skills are easy to spot and never collide with same-named
+skills from elsewhere. Already-prefixed slugs aren't doubled.
+
+Prefer a browser? The catalog is also published as a static site (one
+page per skill, with the copy-paste install line and a ZIP download
+for the Claude desktop/web apps). Build it with `npm run build:web`
+(output in `web/dist/`); it deploys to GitHub Pages on every push to
+`main`.
+
 ## Commands
 
 ```bash
