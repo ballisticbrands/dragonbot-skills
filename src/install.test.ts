@@ -15,7 +15,13 @@ import {
   parsePlatformIds,
   getPlatform,
 } from "./platforms.js";
-import { listBundledSkills, findBundledSkill } from "./skills.js";
+import {
+  listBundledSkills,
+  findBundledSkill,
+  withDragonbotPrefix,
+  stripDragonbotPrefix,
+  prefixFrontmatterName,
+} from "./skills.js";
 import {
   bundleDir,
   appPluginRoot,
@@ -110,7 +116,8 @@ test("resolveDestinations: --dir routes to <dir>/<slug>", () => {
   const dests = resolveDestinations({ slug: "amazon-kw-research", dir: "/custom" });
   assert.equal(dests.length, 1);
   assert.equal(dests[0]!.platform, "custom");
-  assert.equal(dests[0]!.skillPath, path.join("/custom", "amazon-kw-research"));
+  // Installed folder is namespaced even though the slug isn't.
+  assert.equal(dests[0]!.skillPath, path.join("/custom", "dragonbot-amazon-kw-research"));
 });
 
 test("resolveDestinations: explicit targets resolve to <skillsRoot>/<slug>", () => {
@@ -124,8 +131,8 @@ test("resolveDestinations: explicit targets resolve to <skillsRoot>/<slug>", () 
   assert.deepEqual(
     dests.map((d) => d.skillPath),
     [
-      path.join(home, ".claude", "skills", "amazon-kw-research"),
-      path.join(home, ".cursor", "skills", "amazon-kw-research"),
+      path.join(home, ".claude", "skills", "dragonbot-amazon-kw-research"),
+      path.join(home, ".cursor", "skills", "dragonbot-amazon-kw-research"),
     ],
   );
 });
@@ -168,8 +175,8 @@ test("install: --target scopes to listed platforms only", () => {
     bundledRoot: bundled,
     env: { home, cwd },
   });
-  assert.ok(fs.existsSync(path.join(home, ".claude", "skills", "amazon-kw-research", "SKILL.md")));
-  assert.ok(!fs.existsSync(path.join(home, ".cursor", "skills", "amazon-kw-research")));
+  assert.ok(fs.existsSync(path.join(home, ".claude", "skills", "dragonbot-amazon-kw-research", "SKILL.md")));
+  assert.ok(!fs.existsSync(path.join(home, ".cursor", "skills", "dragonbot-amazon-kw-research")));
 });
 
 test("install: --dir routes to a raw directory", () => {
@@ -184,7 +191,7 @@ test("install: --dir routes to a raw directory", () => {
     bundledRoot: bundled,
     env: { home, cwd },
   });
-  assert.ok(fs.existsSync(path.join(customDir, "amazon-kw-research", "SKILL.md")));
+  assert.ok(fs.existsSync(path.join(customDir, "dragonbot-amazon-kw-research", "SKILL.md")));
 });
 
 test("install: existing destination → skipped-exists without --force", () => {
@@ -205,7 +212,7 @@ test("install: --force overwrites and wipes stale files", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
 
   install({ slug: "amazon-kw-research", bundledRoot: bundled, env: { home, cwd } });
-  const installed = path.join(home, ".claude", "skills", "amazon-kw-research");
+  const installed = path.join(home, ".claude", "skills", "dragonbot-amazon-kw-research");
   fs.writeFileSync(path.join(installed, "stale.txt"), "stale");
 
   install({
@@ -231,7 +238,7 @@ test("install: --dry-run reports would-install entries, writes nothing", () => {
     dryRun: true,
   });
   assert.equal(result.entries[0]!.status, "would-install");
-  assert.ok(!fs.existsSync(path.join(home, ".claude", "skills", "amazon-kw-research")));
+  assert.ok(!fs.existsSync(path.join(home, ".claude", "skills", "dragonbot-amazon-kw-research")));
 });
 
 test("install: throws helpfully when no platforms are detected", () => {
@@ -290,13 +297,20 @@ test("install (cowork): writes plugin.json + manifest.json + skills/<slug>/", ()
     fs.readFileSync(path.join(dir, "manifest.json"), "utf8"),
   );
   assert.equal(manifest.skills.length, 1);
-  assert.equal(manifest.skills[0]!.skillId, "amazon-kw-research");
+  assert.equal(manifest.skills[0]!.skillId, "dragonbot-amazon-kw-research");
+  assert.equal(manifest.skills[0]!.name, "dragonbot-amazon-keyword-research");
   assert.equal(manifest.skills[0]!.creatorType, "third-party");
   assert.equal(manifest.skills[0]!.enabled, true);
   assert.ok(typeof manifest.lastUpdated === "number");
 
-  assert.ok(fs.existsSync(path.join(dir, "skills", "amazon-kw-research", "SKILL.md")));
-  assert.ok(fs.existsSync(path.join(dir, "skills", "amazon-kw-research", "references", "foo.md")));
+  assert.ok(fs.existsSync(path.join(dir, "skills", "dragonbot-amazon-kw-research", "SKILL.md")));
+  assert.ok(fs.existsSync(path.join(dir, "skills", "dragonbot-amazon-kw-research", "references", "foo.md")));
+  // The copied SKILL.md's own name is namespaced too.
+  const coworkSkillMd = fs.readFileSync(
+    path.join(dir, "skills", "dragonbot-amazon-kw-research", "SKILL.md"),
+    "utf8",
+  );
+  assert.match(coworkSkillMd, /name:\s*dragonbot-amazon-keyword-research/);
 });
 
 test("install (cowork): a second install merges into the manifest, doesn't overwrite", () => {
@@ -325,10 +339,10 @@ test("install (cowork): a second install merges into the manifest, doesn't overw
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
   assert.equal(manifest.skills.length, 2);
   const ids = manifest.skills.map((s: { skillId: string }) => s.skillId).sort();
-  assert.deepEqual(ids, ["skill-one", "skill-two"]);
+  assert.deepEqual(ids, ["dragonbot-skill-one", "dragonbot-skill-two"]);
   // Both skill folders survived.
-  assert.ok(fs.existsSync(path.join(dir, "skills", "skill-one", "SKILL.md")));
-  assert.ok(fs.existsSync(path.join(dir, "skills", "skill-two", "SKILL.md")));
+  assert.ok(fs.existsSync(path.join(dir, "skills", "dragonbot-skill-one", "SKILL.md")));
+  assert.ok(fs.existsSync(path.join(dir, "skills", "dragonbot-skill-two", "SKILL.md")));
 });
 
 test("install (cowork): --force replaces, --without-force skips an existing skill", () => {
@@ -413,9 +427,9 @@ test("uninstall (cowork): drops the skill from manifest + removes folder", () =>
 
   const dir = bundleDir("cowork", { home, cwd });
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
-  assert.deepEqual(manifest.skills.map((s: { skillId: string }) => s.skillId), ["skill-two"]);
-  assert.ok(!fs.existsSync(path.join(dir, "skills", "skill-one")));
-  assert.ok(fs.existsSync(path.join(dir, "skills", "skill-two")));
+  assert.deepEqual(manifest.skills.map((s: { skillId: string }) => s.skillId), ["dragonbot-skill-two"]);
+  assert.ok(!fs.existsSync(path.join(dir, "skills", "dragonbot-skill-one")));
+  assert.ok(fs.existsSync(path.join(dir, "skills", "dragonbot-skill-two")));
 });
 
 test("uninstall (cowork): removes the entire plugin dir when last skill is gone", () => {
@@ -429,6 +443,64 @@ test("uninstall (cowork): removes the entire plugin dir when last skill is gone"
 
   const dir = bundleDir("cowork", { home, cwd });
   assert.ok(!fs.existsSync(dir), "empty bundle dir should be removed");
+});
+
+// ─── dragonbot- prefix ─────────────────────────────────────────────
+
+test("withDragonbotPrefix / stripDragonbotPrefix are inverse + idempotent", () => {
+  assert.equal(withDragonbotPrefix("amazon-kw-research"), "dragonbot-amazon-kw-research");
+  // Already-prefixed input isn't doubled.
+  assert.equal(withDragonbotPrefix("dragonbot-amazon-kw-research"), "dragonbot-amazon-kw-research");
+  assert.equal(stripDragonbotPrefix("dragonbot-amazon-kw-research"), "amazon-kw-research");
+  assert.equal(stripDragonbotPrefix("amazon-kw-research"), "amazon-kw-research");
+});
+
+test("prefixFrontmatterName rewrites only the name field, idempotently", () => {
+  const once = prefixFrontmatterName(SAMPLE_SKILL);
+  assert.match(once, /name: dragonbot-amazon-keyword-research/);
+  assert.match(once, /description: Amazon keyword research/); // untouched
+  // Running it again doesn't double-prefix.
+  assert.equal(prefixFrontmatterName(once), once);
+});
+
+test("install: namespaces folder + SKILL.md name with dragonbot-", () => {
+  const bundled = mkBundledRoot({ "amazon-kw-research/SKILL.md": SAMPLE_SKILL });
+  const home = mkTmpHome();
+  fs.mkdirSync(path.join(home, ".claude"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
+
+  const result = install({
+    slug: "amazon-kw-research",
+    targets: [getPlatform("claude-code")!],
+    bundledRoot: bundled,
+    env: { home, cwd },
+  });
+  const dest = result.entries[0]!.installedTo;
+  assert.ok(dest.endsWith(path.join("skills", "dragonbot-amazon-kw-research")));
+  const skillMd = fs.readFileSync(path.join(dest, "SKILL.md"), "utf8");
+  assert.match(skillMd, /name: dragonbot-amazon-keyword-research/);
+});
+
+test("install: does not double-prefix an already-prefixed slug", () => {
+  const bundled = mkBundledRoot({ "amazon-kw-research/SKILL.md": SAMPLE_SKILL });
+  const home = mkTmpHome();
+  fs.mkdirSync(path.join(home, ".claude"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dbskills-cwd-"));
+
+  // User passes the already-namespaced slug; source still resolves and
+  // the folder is single-prefixed.
+  install({
+    slug: "dragonbot-amazon-kw-research",
+    targets: [getPlatform("claude-code")!],
+    bundledRoot: bundled,
+    env: { home, cwd },
+  });
+  assert.ok(
+    fs.existsSync(path.join(home, ".claude", "skills", "dragonbot-amazon-kw-research", "SKILL.md")),
+  );
+  assert.ok(
+    !fs.existsSync(path.join(home, ".claude", "skills", "dragonbot-dragonbot-amazon-kw-research")),
+  );
 });
 
 // ─── bundled catalog sanity check ──────────────────────────────────

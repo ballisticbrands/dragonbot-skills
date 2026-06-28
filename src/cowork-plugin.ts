@@ -28,6 +28,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { PlatformEnv } from "./platforms.js";
+import { prefixSkillFileName } from "./skills.js";
 
 // Bundle identity. Stable forever for this package — same on every
 // machine, so reinstalls find the right directory.
@@ -156,6 +157,9 @@ export function installToCowork(args: {
     fs.rmSync(staging, { recursive: true, force: true });
     throw err;
   }
+
+  // Namespace the skill's own `name:` to match its prefixed folder.
+  prefixSkillFileName(path.join(skillDest, "SKILL.md"));
 
   // Merge into manifest.
   const manifestPath = path.join(dir, "manifest.json");

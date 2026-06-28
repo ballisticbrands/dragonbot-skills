@@ -19,7 +19,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { findBundledSkill, listBundledSkills } from "./skills.js";
+import {
+  findBundledSkill,
+  listBundledSkills,
+  withDragonbotPrefix,
+  stripDragonbotPrefix,
+  prefixSkillFileName,
+} from "./skills.js";
 import {
   detectAllPlatforms,
   realEnv,
@@ -74,12 +80,17 @@ export function resolveDestinations(opts: {
 }): Destination[] {
   const env = opts.env ?? realEnv();
 
+  // The installed folder is always namespaced; the catalog slug the
+  // user typed is not. dragonbot-amazon-kw-research lands on disk even
+  // though you install it as `amazon-kw-research`.
+  const installSlug = withDragonbotPrefix(opts.slug);
+
   if (opts.dir) {
     return [
       {
         platform: "custom",
         label: "Custom directory",
-        skillPath: path.join(path.resolve(opts.dir), opts.slug),
+        skillPath: path.join(path.resolve(opts.dir), installSlug),
       },
     ];
   }
@@ -87,23 +98,27 @@ export function resolveDestinations(opts: {
   return platforms.map((p) => ({
     platform: p.id,
     label: p.label,
-    skillPath: path.join(p.skillsRoot(env), opts.slug),
+    skillPath: path.join(p.skillsRoot(env), installSlug),
     entry: p,
   }));
 }
 
 export function install(opts: InstallOpts): InstallResult {
-  const src = findBundledSkill(opts.slug, opts.bundledRoot);
+  // Accept either the bare catalog slug or an already-prefixed one;
+  // the source folder in the package is always the bare slug.
+  const catalogSlug = stripDragonbotPrefix(opts.slug);
+  const installSlug = withDragonbotPrefix(opts.slug);
+  const src = findBundledSkill(catalogSlug, opts.bundledRoot);
   if (!src) {
     throw new Error(
-      `Skill not found in this package: ${opts.slug}\n` +
+      `Skill not found in this package: ${catalogSlug}\n` +
         `Run \`dragonbot-skills list\` to see what's available.`,
     );
   }
 
   const env = opts.env ?? realEnv();
   const destinations = resolveDestinations({
-    slug: opts.slug,
+    slug: catalogSlug,
     targets: opts.targets,
     dir: opts.dir,
     env,
@@ -120,9 +135,9 @@ export function install(opts: InstallOpts): InstallResult {
   }
 
   const skillMeta = listBundledSkills(opts.bundledRoot).find(
-    (s) => s.slug === opts.slug,
+    (s) => s.slug === catalogSlug,
   );
-  const skillName = skillMeta?.name ?? opts.slug;
+  const skillName = withDragonbotPrefix(skillMeta?.name ?? catalogSlug);
   const skillDescription = skillMeta?.description ?? "";
   const pluginVersion = opts.packageVersion ?? detectPackageVersion();
 
@@ -143,7 +158,7 @@ export function install(opts: InstallOpts): InstallResult {
       const result = dest.entry.customInstaller.install({
         env,
         srcSkillDir: src,
-        slug: opts.slug,
+        slug: installSlug,
         name: skillName,
         description: skillDescription,
         pluginVersion,
@@ -177,7 +192,10 @@ export function install(opts: InstallOpts): InstallResult {
       }
       const parentDir = path.dirname(installedTo);
       fs.mkdirSync(parentDir, { recursive: true });
-      copyIntoPlace(src, installedTo, opts.slug, parentDir);
+      copyIntoPlace(src, installedTo, installSlug, parentDir);
+      // Namespace the skill's own `name:` so it shows up prefixed in
+      // the client's skills list, matching the folder name.
+      prefixSkillFileName(path.join(installedTo, "SKILL.md"));
       entries.push({
         platform: dest.platform,
         label: dest.label,
@@ -218,6 +236,7 @@ export type UninstallResult = {
 
 export function uninstall(opts: UninstallOpts): UninstallResult {
   const env = opts.env ?? realEnv();
+  const installSlug = withDragonbotPrefix(opts.slug);
   const destinations = resolveDestinations({
     slug: opts.slug,
     targets: opts.targets,
@@ -227,7 +246,7 @@ export function uninstall(opts: UninstallOpts): UninstallResult {
   const entries: UninstallEntry[] = [];
   for (const dest of destinations) {
     if (dest.entry?.customInstaller) {
-      const result = dest.entry.customInstaller.uninstall({ env, slug: opts.slug });
+      const result = dest.entry.customInstaller.uninstall({ env, slug: installSlug });
       entries.push({
         platform: dest.platform,
         label: dest.label,

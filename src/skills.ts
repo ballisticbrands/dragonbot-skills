@@ -16,6 +16,62 @@ export type SkillSummary = {
   description: string;
 };
 
+// Every skill installed (or downloaded) through DragonBot is namespaced
+// with this prefix so it's instantly identifiable in a user's skills
+// list and can't collide with same-named skills from elsewhere. The
+// catalog slug (the repo folder, the `install <slug>` argument) stays
+// unprefixed; the prefix is applied to the *installed artifact*.
+export const DRAGONBOT_PREFIX = "dragonbot-";
+
+/** Add the dragonbot- prefix unless it's already there. Idempotent. */
+export function withDragonbotPrefix(value: string): string {
+  return value.startsWith(DRAGONBOT_PREFIX) ? value : `${DRAGONBOT_PREFIX}${value}`;
+}
+
+/** Drop a leading dragonbot- prefix, if present. The inverse mapping. */
+export function stripDragonbotPrefix(value: string): string {
+  return value.startsWith(DRAGONBOT_PREFIX)
+    ? value.slice(DRAGONBOT_PREFIX.length)
+    : value;
+}
+
+/**
+ * Rewrite the `name:` field in SKILL.md frontmatter to its
+ * dragonbot-prefixed form. Idempotent and a no-op when there's no
+ * frontmatter / no name. Returns the (possibly unchanged) text.
+ */
+export function prefixFrontmatterName(raw: string): string {
+  if (!raw.startsWith("---")) return raw;
+  const end = raw.indexOf("\n---", 3);
+  if (end < 0) return raw;
+  const header = raw.slice(0, end);
+  const rest = raw.slice(end);
+  const newHeader = header.replace(
+    /^(\s*name\s*:\s*)(.+?)\s*$/m,
+    (_m, lead: string, val: string) =>
+      `${lead}${withDragonbotPrefix(stripQuotes(val))}`,
+  );
+  return newHeader + rest;
+}
+
+/** Rewrite a SKILL.md file in place so its `name:` is prefixed. */
+export function prefixSkillFileName(skillMdPath: string): void {
+  if (!fs.existsSync(skillMdPath)) return;
+  const raw = fs.readFileSync(skillMdPath, "utf8");
+  const next = prefixFrontmatterName(raw);
+  if (next !== raw) fs.writeFileSync(skillMdPath, next);
+}
+
+function stripQuotes(v: string): string {
+  if (
+    (v.startsWith('"') && v.endsWith('"')) ||
+    (v.startsWith("'") && v.endsWith("'"))
+  ) {
+    return v.slice(1, -1);
+  }
+  return v;
+}
+
 /**
  * Absolute path to the bundled `skills/` directory.
  *

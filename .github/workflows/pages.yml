@@ -1,0 +1,49 @@
+name: Deploy skills site to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    # Only rebuild when the site generator or the skills it renders change.
+    paths:
+      - "web/**"
+      - "skills/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# Allow the workflow to publish to Pages via OIDC.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One in-flight deploy at a time; don't cancel a running publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # No dependencies: build.mjs uses Node built-ins + the `zip`
+      # binary (preinstalled on ubuntu-latest).
+      - name: Build static site
+        run: node web/build.mjs
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
